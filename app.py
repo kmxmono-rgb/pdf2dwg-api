@@ -1,3 +1,4 @@
+from fastapi.responses import FileResponse, HTMLResponse
 import os
 import shutil
 import subprocess
@@ -216,3 +217,10 @@ async def download_file(job_id: str, filename: str):
             return FileResponse(path=str(candidate), filename=filename, media_type="application/octet-stream")
 
     raise HTTPException(status_code=404, detail="找不到可下載的檔案")
+
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    html_file = Path(__file__).parent / "index.html"
+    if html_file.exists():
+        return html_file.read_text(encoding="utf-8")
+    return "<h3>API is running. Please upload index.html to repository root.</h3>"
