@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF 轉 DWG 線上工具（向量 / 掃描皆可）</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif;
+      background: #f5f7fa;
+      color: #1f2937;
+      margin: 0;
+      padding: 32px 16px;
+    }
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 14px;
+      padding: 28px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+    h1 { margin-top: 0; font-size: 24px; }
+    .hint { color: #4b5563; font-size: 14px; line-height: 1.6; }
+    .notice {
+      background: #fffbeb;
+      border-left: 4px solid #f59e0b;
+      padding: 12px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #78350f;
+      margin: 16px 0;
+    }
+    .box {
+      border: 2px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 24px;
+      text-align: center;
+      margin: 18px 0;
+      background: #f8fafc;
+    }
+    select, button {
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 15px;
+      border: 1px solid #cbd5e1;
+    }
+    button {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    .status { margin-top: 16px; font-size: 14px; line-height: 1.6; }
+    .download-btn {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 10px 18px;
+      background: #059669;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PDF 轉 DWG 工具</h1>
+    <p class="hint">
+      支援 AutoCAD / 建築工程向量圖面與掃描／一般文件 PDF。系統會自動辨識或依您選擇的模式進行轉換。
+    </p>
+
+    <div class="notice">
+      <strong>使用提醒：</strong>轉檔結果僅供 CAD 繪圖與參考使用。掃描圖面或複雜建築圖層轉出後，正式出圖或施工前請務必於 AutoCAD / CAD 軟體中核對比例、尺寸與圖層。
+    </div>
+
+    <div class="box">
+      <input type="file" id="pdfInput" accept="application/pdf" />
+    </div>
+
+    <label for="modeSelect"><strong>轉換模式：</strong></label>
+    <select id="modeSelect">
+      <option value="auto">自動判斷（推薦）</option>
+      <option value="vector">向量工程圖模式</option>
+      <option value="scan">掃描／一般文件模式</option>
+    </select>
+
+    <button id="convertBtn" style="margin-left: 10px;">開始轉檔</button>
+
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    const API_BASE = "http://127.0.0.1:8000";
+    const pdfInput = document.getElementById("pdfInput");
+    const modeSelect = document.getElementById("modeSelect");
+    const convertBtn = document.getElementById("convertBtn");
+    const statusEl = document.getElementById("status");
+
+    convertBtn.addEventListener("click", async () => {
+      const file = pdfInput.files[0];
+      if (!file) {
+        statusEl.innerHTML = `<span style="color:#dc2626;">請先選擇一份 PDF 檔案。</span>`;
+        return;
+      }
+
+      convertBtn.disabled = true;
+      statusEl.innerHTML = "正在處理 PDF 並產生 CAD 檔案，請稍候...";
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("mode", modeSelect.value);
+
+        const res = await fetch(`${API_BASE}/api/convert`, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.detail || "轉檔失敗");
+        }
+
+        statusEl.innerHTML = `
+          <div><strong>轉檔完成！</strong></div>
+          <div>辨識／使用模式：<code>${data.mode_used}</code></div>
+          <div>輸出格式：<code>${data.format}</code></div>
+          <a class="download-btn" href="${API_BASE}${data.download_url}" download="${data.filename}">
+            下載 ${data.filename}
+          </a>
+        `;
+      } catch (err) {
+        statusEl.innerHTML = `<span style="color:#dc2626;">錯誤：${err.message}</span>`;
+      } finally {
+        convertBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
