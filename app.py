@@ -81,7 +81,8 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
     doc = ezdxf.new(dxfversion="R2013")
     msp = doc.modelspace()
-    msp.add_layer("VECTOR_LINES", color=7)
+    if "VECTOR_LINES" not in doc.layers:
+    doc.layers.new(name="VECTOR_LINES", dxfattribs={"color": 7})
 
     height, _ = gray.shape
     if lines is not None:
@@ -110,8 +111,10 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
     doc = ezdxf.new(dxfversion="R2013")
     msp = doc.modelspace()
-    msp.add_layer("SCAN_LINES", color=3)
-    msp.add_layer("SCAN_CONTOURS", color=5)
+    if "SCAN_LINES" not in doc.layers:
+    doc.layers.new(name="SCAN_LINES", dxfattribs={"color": 3})
+    if "SCAN_CONTOURS" not in doc.layers:
+    doc.layers.new(name="SCAN_CONTOURS", dxfattribs={"color": 5})
 
     height, _ = gray.shape
 
