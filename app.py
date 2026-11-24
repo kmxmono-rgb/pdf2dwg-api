@@ -76,6 +76,26 @@ def render_page_image(pdf_path: Path, page_index: int = 0, dpi: int = 150) -> np
         doc.close()
 
 
+def add_lines_to_modelspace(
+    msp,
+    lines,
+    layer_name: str,
+    height: int,
+    max_lines: int = 3000,
+) -> None:
+    if lines is None:
+        return
+    for line in lines[:max_lines]:
+        pts = np.asarray(line).reshape(-1)
+        if pts.size >= 4:
+            x1, y1, x2, y2 = float(pts[0]), float(pts[1]), float(pts[2]), float(pts[3])
+            msp.add_line(
+                (x1, float(height) - y1),
+                (x2, float(height) - y2),
+                dxfattribs={"layer": layer_name},
+            )
+
+
 def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
     img = render_page_image(pdf_path, page_index=0, dpi=150)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -87,14 +107,7 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
     ensure_layer(doc, "VECTOR_LINES", color=7)
 
     height, _ = gray.shape
-    if lines is not None:
-        for line in lines[:3000]:
-            x1, y1, x2, y2 = line[0]
-            msp.add_line(
-                (float(x1), float(height - y1)),
-                (float(x2), float(height - y2)),
-                dxfattribs={"layer": "VECTOR_LINES"},
-            )
+    add_lines_to_modelspace(msp, lines, "VECTOR_LINES", height, max_lines=3000)
 
     doc.saveas(str(dxf_path))
 
@@ -116,15 +129,7 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
     ensure_layer(doc, "SCAN_CONTOURS", color=5)
 
     height, _ = gray.shape
-
-    if lines is not None:
-        for line in lines[:3000]:
-            x1, y1, x2, y2 = line[0]
-            msp.add_line(
-                (float(x1), float(height - y1)),
-                (float(x2), float(height - y2)),
-                dxfattribs={"layer": "SCAN_LINES"},
-            )
+    add_lines_to_modelspace(msp, lines, "SCAN_LINES", height, max_lines=3000)
 
     added_contours = 0
     for cnt in contours:
@@ -132,7 +137,7 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
             break
         if cv2.contourArea(cnt) < 150:
             continue
-        pts = [(float(pt[0][0]), float(height - pt[0][1])) for pt in cnt]
+        pts = [(float(pt[0][0]), float(height) - float(pt[0][1])) for pt in cnt]
         if len(pts) >= 3:
             msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": "SCAN_CONTOURS"})
             added_contours += 1
