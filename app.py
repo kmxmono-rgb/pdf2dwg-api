@@ -1,8 +1,8 @@
-from fastapi.responses import FileResponse, HTMLResponse
 import os
 import shutil
 import subprocess
 import tempfile
+import traceback
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -13,7 +13,7 @@ import numpy as np
 import pypdfium2 as pdfium
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 app = FastAPI(title="PDF to DWG Converter MVP")
 
@@ -27,12 +27,14 @@ app.add_middleware(
 BASE_DIR = Path(tempfile.gettempdir()) / "pdf2dwg_jobs"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# 若本機已安裝 ODA File Converter，可改為實際安裝路徑或設定環境變數 ODA_PATH
-ODA_EXE = os.environ.get("ODA_PATH") or shutil.which("ODAFileConverter") or r"C:\Program Files\ODA\ODAFileConverter\ODAFileConverter.exe"
+ODA_EXE = (
+    os.environ.get("ODA_PATH")
+    or shutil.which("ODAFileConverter")
+    or r"C:\Program Files\ODA\ODAFileConverter\ODAFileConverter.exe"
+)
 
 
 def is_vector_pdf(pdf_path: Path) -> bool:
-    """簡單判斷 PDF 是否有可解析的文字/內容流，作為自動分流依據"""
     doc = pdfium.PdfDocument(str(pdf_path))
     try:
         for i in range(min(len(doc), 3)):
@@ -46,25 +48,33 @@ def is_vector_pdf(pdf_path: Path) -> bool:
         doc.close()
 
 
-def render_page_image(pdf_path: Path, page_index: int = 0, dpi: int = 250) -> np.ndarray:
+def render_page_image(pdf_path: Path, page_index: int = 0, dpi: int = 150) -> np.ndarray:
+    """控制 DPI 上限以降低 Render 免費版記憶體用量"""
     doc = pdfium.PdfDocument(str(pdf_path))
     try:
-        page = doc[page_index]
+        if len(doc) == 0:
+            raise ValueError("PDF 沒有任何頁面")
+        safe_index = min(max(page_index, 0), len(doc) - 1)
+        page = doc[safe_index]
         scale = dpi / 72.0
         bitmap = page.render(scale=scale)
         pil_img = bitmap.to_pil().convert("RGB")
-        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        arr = np.array(pil_img)
+
+        # 若圖片太大，等比縮小最長邊至 2400px，避免記憶體爆掉
+        max_dim = 2400
+        h, w, _ = arr.shape
+        if max(h, w) > max_dim:
+            ratio = max_dim / float(max(h, w))
+            arr = cv2.resize(arr, (int(w * ratio), int(h * ratio)), interpolation=cv2.INTER_AREA)
+
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     finally:
         doc.close()
 
 
 def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
-    """
-    向量 PDF 路線：
-    目前 MVP 先將第一頁渲染後做線段擷取並輸出為標準 DXF；
-    若需高精度工程線段還原，可再接入 PDF 路徑指令解析或專業 CAD 引擎。
-    """
-    img = render_page_image(pdf_path, page_index=0, dpi=200)
+    img = render_page_image(pdf_path, page_index=0, dpi=150)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=30, maxLineGap=10)
@@ -75,9 +85,8 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
     height, _ = gray.shape
     if lines is not None:
-        for line in lines:
+        for line in lines[:3000]:  # 限制最大線段數，避免超大檔案卡死
             x1, y1, x2, y2 = line[0]
-            # 轉換影像座標（左上原點）至 CAD 座標（左下原點）
             msp.add_line(
                 (float(x1), float(height - y1)),
                 (float(x2), float(height - y2)),
@@ -88,13 +97,10 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
 
 def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
-    """
-    掃描／一般文件 PDF 路線：
-    去雜訊、二值化、輪廓與直線偵測後輸出 DXF。
-    """
-    img = render_page_image(pdf_path, page_index=0, dpi=250)
+    img = render_page_image(pdf_path, page_index=0, dpi=150)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, h=10)
+    # 改用較省記憶體的中值濾波取代 fastNlMeansDenoising
+    denoised = cv2.medianBlur(gray, 3)
     thresh = cv2.adaptiveThreshold(
         denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10
     )
@@ -110,7 +116,7 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
     height, _ = gray.shape
 
     if lines is not None:
-        for line in lines:
+        for line in lines[:3000]:
             x1, y1, x2, y2 = line[0]
             msp.add_line(
                 (float(x1), float(height - y1)),
@@ -118,18 +124,21 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
                 dxfattribs={"layer": "SCAN_LINES"},
             )
 
+    added_contours = 0
     for cnt in contours:
-        if cv2.contourArea(cnt) < 120:
+        if added_contours >= 1500:
+            break
+        if cv2.contourArea(cnt) < 150:
             continue
         pts = [(float(pt[0][0]), float(height - pt[0][1])) for pt in cnt]
         if len(pts) >= 3:
             msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": "SCAN_CONTOURS"})
+            added_contours += 1
 
     doc.saveas(str(dxf_path))
 
 
 def dxf_to_dwg(dxf_path: Path, out_dir: Path) -> Optional[Path]:
-    """透過 ODA File Converter 將 DXF 轉為 DWG（AutoCAD 2013 格式）"""
     if not os.path.exists(ODA_EXE):
         return None
 
@@ -140,7 +149,6 @@ def dxf_to_dwg(dxf_path: Path, out_dir: Path) -> Optional[Path]:
 
     shutil.copy2(dxf_path, in_dir / dxf_path.name)
 
-    # ODA 參數: <輸入資料夾> <輸出資料夾> <輸出版本> <輸出格式> <遞迴> <審核> [篩選]
     cmd = [
         ODA_EXE,
         str(in_dir),
@@ -157,10 +165,18 @@ def dxf_to_dwg(dxf_path: Path, out_dir: Path) -> Optional[Path]:
     return dwg_file if dwg_file.exists() else None
 
 
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    html_file = Path(__file__).parent / "index.html"
+    if html_file.exists():
+        return html_file.read_text(encoding="utf-8")
+    return "<h3>API is running. Please upload index.html to repository root.</h3>"
+
+
 @app.post("/api/convert")
 async def convert_pdf(
     file: UploadFile = File(...),
-    mode: str = Form("auto"),  # auto | vector | scan
+    mode: str = Form("auto"),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="請上傳 PDF 檔案")
@@ -169,38 +185,51 @@ async def convert_pdf(
     job_dir = BASE_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    pdf_path = job_dir / "input.pdf"
-    with open(pdf_path, "wb") as f:
-        f.write(await file.read())
+    try:
+        content = await file.read()
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="檔案超過 25MB 上限，請改用較小的 PDF 測試")
 
-    if mode == "auto":
-        detected_mode = "vector" if is_vector_pdf(pdf_path) else "scan"
-    else:
-        detected_mode = mode
+        pdf_path = job_dir / "input.pdf"
+        with open(pdf_path, "wb") as f:
+            f.write(content)
 
-    dxf_path = job_dir / "output.dxf"
-    if detected_mode == "vector":
-        vector_pdf_to_dxf(pdf_path, dxf_path)
-    else:
-        scan_pdf_to_dxf(pdf_path, dxf_path)
+        if mode == "auto":
+            detected_mode = "vector" if is_vector_pdf(pdf_path) else "scan"
+        else:
+            detected_mode = mode
 
-    dwg_path = dxf_to_dwg(dxf_path, job_dir)
-    if dwg_path:
-        final_file = dwg_path
-        download_name = Path(file.filename).stem + ".dwg"
-        format_used = "DWG (via ODA)"
-    else:
-        final_file = dxf_path
-        download_name = Path(file.filename).stem + ".dxf"
-        format_used = "DXF (未安裝 ODA，提供相容 CAD 向量檔)"
+        dxf_path = job_dir / "output.dxf"
+        if detected_mode == "vector":
+            vector_pdf_to_dxf(pdf_path, dxf_path)
+        else:
+            scan_pdf_to_dxf(pdf_path, dxf_path)
 
-    return {
-        "job_id": job_id,
-        "mode_used": detected_mode,
-        "format": format_used,
-        "download_url": f"/api/download/{job_id}/{download_name}",
-        "filename": download_name,
-    }
+        dwg_path = dxf_to_dwg(dxf_path, job_dir)
+        if dwg_path:
+            final_file = dwg_path
+            download_name = Path(file.filename).stem + ".dwg"
+            format_used = "DWG (via ODA)"
+        else:
+            final_file = dxf_path
+            download_name = Path(file.filename).stem + ".dxf"
+            format_used = "DXF (相容 CAD 向量檔)"
+
+        if not final_file.exists():
+            raise RuntimeError("輸出檔案未成功產生")
+
+        return {
+            "job_id": job_id,
+            "mode_used": detected_mode,
+            "format": format_used,
+            "download_url": f"/api/download/{job_id}/{download_name}",
+            "filename": download_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"轉檔處理失敗：{str(exc)}")
 
 
 @app.get("/api/download/{job_id}/{filename}")
@@ -214,13 +243,10 @@ async def download_file(job_id: str, filename: str):
         job_dir / "output.dxf",
     ]:
         if candidate.exists():
-            return FileResponse(path=str(candidate), filename=filename, media_type="application/octet-stream")
+            return FileResponse(
+                path=str(candidate),
+                filename=filename,
+                media_type="application/octet-stream",
+            )
 
     raise HTTPException(status_code=404, detail="找不到可下載的檔案")
-
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    html_file = Path(__file__).parent / "index.html"
-    if html_file.exists():
-        return html_file.read_text(encoding="utf-8")
-    return "<h3>API is running. Please upload index.html to repository root.</h3>"
