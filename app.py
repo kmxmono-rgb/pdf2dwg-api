@@ -34,6 +34,11 @@ ODA_EXE = (
 )
 
 
+def ensure_layer(doc: ezdxf.document.Drawing, name: str, color: int = 7) -> None:
+    if name not in doc.layers:
+        doc.layers.new(name=name, dxfattribs={"color": color})
+
+
 def is_vector_pdf(pdf_path: Path) -> bool:
     doc = pdfium.PdfDocument(str(pdf_path))
     try:
@@ -49,7 +54,6 @@ def is_vector_pdf(pdf_path: Path) -> bool:
 
 
 def render_page_image(pdf_path: Path, page_index: int = 0, dpi: int = 150) -> np.ndarray:
-    """控制 DPI 上限以降低 Render 免費版記憶體用量"""
     doc = pdfium.PdfDocument(str(pdf_path))
     try:
         if len(doc) == 0:
@@ -61,7 +65,6 @@ def render_page_image(pdf_path: Path, page_index: int = 0, dpi: int = 150) -> np
         pil_img = bitmap.to_pil().convert("RGB")
         arr = np.array(pil_img)
 
-        # 若圖片太大，等比縮小最長邊至 2400px，避免記憶體爆掉
         max_dim = 2400
         h, w, _ = arr.shape
         if max(h, w) > max_dim:
@@ -81,12 +84,11 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
     doc = ezdxf.new(dxfversion="R2013")
     msp = doc.modelspace()
-    if "VECTOR_LINES" not in doc.layers:
-    doc.layers.new(name="VECTOR_LINES", dxfattribs={"color": 7})
+    ensure_layer(doc, "VECTOR_LINES", color=7)
 
     height, _ = gray.shape
     if lines is not None:
-        for line in lines[:3000]:  # 限制最大線段數，避免超大檔案卡死
+        for line in lines[:3000]:
             x1, y1, x2, y2 = line[0]
             msp.add_line(
                 (float(x1), float(height - y1)),
@@ -100,7 +102,6 @@ def vector_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
     img = render_page_image(pdf_path, page_index=0, dpi=150)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # 改用較省記憶體的中值濾波取代 fastNlMeansDenoising
     denoised = cv2.medianBlur(gray, 3)
     thresh = cv2.adaptiveThreshold(
         denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 10
@@ -111,10 +112,8 @@ def scan_pdf_to_dxf(pdf_path: Path, dxf_path: Path) -> None:
 
     doc = ezdxf.new(dxfversion="R2013")
     msp = doc.modelspace()
-    if "SCAN_LINES" not in doc.layers:
-    doc.layers.new(name="SCAN_LINES", dxfattribs={"color": 3})
-    if "SCAN_CONTOURS" not in doc.layers:
-    doc.layers.new(name="SCAN_CONTOURS", dxfattribs={"color": 5})
+    ensure_layer(doc, "SCAN_LINES", color=3)
+    ensure_layer(doc, "SCAN_CONTOURS", color=5)
 
     height, _ = gray.shape
 
